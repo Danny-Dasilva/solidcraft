@@ -65,7 +65,7 @@ fn services() -> Services {
         pick_open: Some(Box::new(|| {
             rfd::FileDialog::new()
                 .add_filter(
-                    "Designs, STEP, IGES and meshes",
+                    "Designs, STEP, IGES, USD and meshes",
                     &[
                         io::DESIGN_EXT,
                         io::LEGACY_DESIGN_EXT,
@@ -78,6 +78,10 @@ fn services() -> Services {
                         "iges",
                         "IGS",
                         "IGES",
+                        "usda",
+                        "usd",
+                        "USDA",
+                        "USD",
                         "3mf",
                         "3MF",
                         "stl",
@@ -87,6 +91,7 @@ fn services() -> Services {
                 .add_filter("SolidCraft design (container or JSON)", &[io::DESIGN_EXT, io::LEGACY_DESIGN_EXT, "json"])
                 .add_filter("STEP", &["step", "stp", "STEP", "STP"])
                 .add_filter("IGES", &["igs", "iges", "IGS", "IGES"])
+                .add_filter("USD (usd-brep)", &["usda", "usd", "USDA", "USD"])
                 .add_filter("Mesh (3MF, STL)", &["3mf", "3MF", "stl", "STL"])
                 .add_filter("Sketch drawings (DXF, SVG)", &["dxf", "DXF", "svg", "SVG"])
                 .add_filter("All files", &["*"])

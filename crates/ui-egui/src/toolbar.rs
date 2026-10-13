@@ -425,6 +425,10 @@ fn file_menu(app: &mut SolveApp, ctx: &egui::Context) {
                     export(app, "step");
                     close = true;
                 }
+                if item_if(ui, "Export USD…", "", shown) {
+                    export(app, "usda");
+                    close = true;
+                }
                 if item_if(ui, "Export 3MF…", "", shown) {
                     export(app, "3mf");
                     close = true;
@@ -1457,8 +1461,18 @@ mod home_tests {
             let name = if cmd { format!("Ctrl+{key}") } else { key.to_string() };
             actions.push((name, Box::new(move |h| drop(h.call("ui.key", json!({"key": key, "cmd": cmd}))))));
         }
-        for item in ["Insert STEP…", "Insert Mesh…", "Save", "Save As…", "Export STL…", "Export STEP…", "Export 3MF…", "Export OBJ…", "Export URDF…"]
-        {
+        for item in [
+            "Insert STEP…",
+            "Insert Mesh…",
+            "Save",
+            "Save As…",
+            "Export STL…",
+            "Export STEP…",
+            "Export USD…",
+            "Export 3MF…",
+            "Export OBJ…",
+            "Export URDF…",
+        ] {
             actions.push((
                 format!("File › {item}"),
                 Box::new(move |h| {
