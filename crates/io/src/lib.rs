@@ -73,18 +73,23 @@ pub type Result<T> = std::result::Result<T, IoError>;
 /// Largest STEP file we read.
 pub const MAX_STEP_BYTES: usize = 512 << 20;
 
-/// Is this a CAD exchange file read as an Import base feature: STEP (`.step` / `.stp`) or IGES
-/// (`.igs` / `.iges`), any case?
+/// Is this a CAD exchange file read as an Import base feature: STEP (`.step` / `.stp`), IGES
+/// (`.igs` / `.iges`) or usd-brep (`.usda` / `.usd`), any case?
 pub fn is_step_path(path: &str) -> bool {
     std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| ["step", "stp", "igs", "iges"].iter().any(|x| e.eq_ignore_ascii_case(x)))
+        .is_some_and(|e| ["step", "stp", "igs", "iges", "usda", "usd"].iter().any(|x| e.eq_ignore_ascii_case(x)))
 }
 
 /// Is this an IGES file name (`.igs` / `.iges`, any case)?
 pub fn is_iges_path(path: &str) -> bool {
     std::path::Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("igs") || e.eq_ignore_ascii_case("iges"))
+}
+
+/// Is this a usd-brep file name (`.usda` / `.usd`, any case)?
+pub fn is_usd_path(path: &str) -> bool {
+    std::path::Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("usda") || e.eq_ignore_ascii_case("usd"))
 }
 
 /// A STEP file read as an import feature.
@@ -103,14 +108,29 @@ pub struct StepFeature {
 /// Read STEP bytes (`file` is the source file name) into an Import base feature. The file is
 /// read once here to fail early and collect names; the feature holds the STEP text.
 pub fn step_import_feature(bytes: &[u8], file: &str) -> Result<StepFeature> {
-    if bytes.len() > MAX_STEP_BYTES {
-        return Err(IoError::Invalid(format!("STEP file too large ({} MB, limit {} MB)", bytes.len() >> 20, MAX_STEP_BYTES >> 20)));
+    let (kind, limit) = if is_usd_path(file) {
+        ("USD", solidcraft_kernel::MAX_USD_BYTES)
+    } else if is_iges_path(file) {
+        ("IGES", MAX_STEP_BYTES)
+    } else {
+        ("STEP", MAX_STEP_BYTES)
+    };
+    if bytes.len() > limit {
+        return Err(IoError::Invalid(format!("{kind} file too large ({} MB, limit {} MB)", bytes.len() >> 20, limit >> 20)));
     }
-    // STEP is 7-bit text with escapes; tolerate stray 8-bit bytes. IGES is restated as STEP
-    // (the feature keeps that STEP text).
+    // STEP is 7-bit text with escapes; tolerate stray 8-bit bytes. IGES and usd-brep are restated
+    // as STEP (the feature keeps that STEP text).
+    if is_usd_path(file) && bytes.starts_with(b"PXR-USDC") {
+        return Err(IoError::Invalid("binary USD (usdc) is not supported yet: save the file as text (.usda)".into()));
+    }
     let text = String::from_utf8_lossy(bytes).into_owned();
-    let (text, iges_warnings) =
-        if is_iges_path(file) { solidcraft_kernel::iges_to_step(&text).map_err(IoError::Invalid)? } else { (text, Vec::new()) };
+    let (text, translate_warnings) = if is_iges_path(file) {
+        solidcraft_kernel::iges_to_step(&text).map_err(IoError::Invalid)?
+    } else if is_usd_path(file) {
+        solidcraft_kernel::usd_to_step(&text).map_err(IoError::Invalid)?
+    } else {
+        (text, Vec::new())
+    };
     let imp = solidcraft_kernel::step_import_shared(&text)?;
     let stem = std::path::Path::new(file)
         .file_stem()
@@ -129,7 +149,7 @@ pub fn step_import_feature(bytes: &[u8], file: &str) -> Result<StepFeature> {
         name,
         body_names: imp.bodies.iter().map(|b| b.name.clone()).collect(),
         kind: solidcraft_doc::FeatureKind::Import { file: file_name, step: text.into(), components: imp.tree.clone() },
-        warnings: iges_warnings.into_iter().chain(imp.warnings.iter().cloned()).collect(),
+        warnings: translate_warnings.into_iter().chain(imp.warnings.iter().cloned()).collect(),
         import: imp,
     })
 }
@@ -202,6 +222,8 @@ pub enum Format {
     Obj,
     Step,
     Iges,
+    /// usd-brep (`BrepArray`) as USD text.
+    Usd,
     ThreeMf,
     /// 3MF whose triangles carry their B-rep face, at full precision, for meshing and analysis
     /// tools (docs/formats/3mf-face-tags.md). Chosen by name only; a
@@ -223,6 +245,7 @@ impl Format {
             "obj" => Format::Obj,
             "step" | "stp" => Format::Step,
             "igs" | "iges" => Format::Iges,
+            "usda" | "usd" => Format::Usd,
             "3mf" => Format::ThreeMf,
             "3mf-tagged" => Format::ThreeMfTagged,
             "urdf" => Format::Urdf,
@@ -340,6 +363,12 @@ pub fn export(state: &ModelState, bodies: &[String], format: Format, name: &str)
                 sel.iter().map(|b| solidcraft_kernel::ExportBody { name: b.name.clone(), body: &b.body, color: b.body.color() }).collect();
             let header = solidcraft_kernel::StepHeader { file_name: format!("{name}.igs"), ..Default::default() };
             solidcraft_kernel::iges_export_bodies(&bs, &header)?.into_bytes()
+        }
+        Format::Usd => {
+            let bs: Vec<solidcraft_kernel::ExportBody> =
+                sel.iter().map(|b| solidcraft_kernel::ExportBody { name: b.name.clone(), body: &b.body, color: b.body.color() }).collect();
+            let header = solidcraft_kernel::StepHeader { file_name: format!("{name}.usda"), ..Default::default() };
+            solidcraft_kernel::usd_export_bodies(&bs, &header)?.into_bytes()
         }
         Format::ThreeMf | Format::ThreeMfTagged => {
             let objs: Vec<MeshObject> = sel.iter().map(|b| mesh_object(b, format == Format::ThreeMfTagged)).collect::<Result<_>>()?;
