@@ -1699,6 +1699,42 @@ fn iges_export_and_open() {
     assert_eq!(st.bodies[1].body.color(), Some([1.0, 0.0, 0.0]));
 }
 
+/// usd-brep: a design exports as USD text (`BrepArray` prims) and the file opens again as an
+/// Import feature with the same bodies, names, volumes and colours.
+#[test]
+fn usd_export_and_open() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 40, "width": 30, "height": 5, "body_name": "Plate"}));
+    run(&mut s, "solid.cylinder", json!({"radius": 4, "height": 20, "base": [10, 10, 5], "body_name": "Pin"}));
+    run(&mut s, "appearance.assign", json!({"bodies": ["Pin"], "color": "#ff0000"}));
+    let want: Vec<f64> = s.world_state().bodies.iter().map(|b| solidcraft_kernel::measure(&b.body).unwrap().volume).collect();
+    let p = std::env::temp_dir().join(format!("solidcraft-usd-{}.usda", std::process::id()));
+    run(&mut s, "file.export", json!({"path": p.to_string_lossy()}));
+    let text = std::fs::read_to_string(&p).unwrap();
+    assert!(text.starts_with("#usda 1.0") && text.contains("def BrepArray"), "{}", &text[..text.len().min(200)]);
+    let mut s2 = Session::default();
+    run(&mut s2, "doc.open", json!({"path": p.to_string_lossy()}));
+    let _ = std::fs::remove_file(&p);
+    let st = s2.world_state();
+    let names: Vec<&str> = st.bodies.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["Plate", "Pin"]);
+    for (b, v) in st.bodies.iter().zip(&want) {
+        assert!(rel(solidcraft_kernel::measure(&b.body).unwrap().volume, *v) < 1e-4);
+    }
+    assert_eq!(st.bodies[1].body.color(), Some([1.0, 0.0, 0.0]));
+}
+
+/// A binary USD file is refused with a message, not misread as text.
+#[test]
+fn usd_binary_is_refused() {
+    let p = std::env::temp_dir().join(format!("solidcraft-usdc-{}.usd", std::process::id()));
+    std::fs::write(&p, b"PXR-USDC\0\0\0\0garbage").unwrap();
+    let mut s = Session::default();
+    let e = s.execute("doc.open", &json!({"path": p.to_string_lossy()}));
+    let _ = std::fs::remove_file(&p);
+    assert!(e.is_err_and(|e| e.to_string().contains("binary USD")));
+}
+
 /// Split Body by a face of another body (its surface extended): a box cut by a cylinder's
 /// side into the core and the rest; volumes add up exactly.
 #[test]
