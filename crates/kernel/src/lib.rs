@@ -68,6 +68,7 @@ mod sweep_path;
 mod thread_tests;
 mod topo;
 mod tspline;
+mod usd;
 
 pub use blend::{ChamferSide, chamfer, chamfer_sides, fillet, fillet_max};
 pub use blend_corner::fillet_radii;
@@ -101,6 +102,7 @@ pub use sweep_path::sweep_path;
 pub use topo::{CylinderFace, cylinder_face_at};
 pub use topo::{TopoCounts, merged_topology, seam_flags};
 pub use tspline::tspline_sheet;
+pub use usd::{MAX_USD_BYTES, usd_export_bodies, usd_to_step};
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum KernelError {
