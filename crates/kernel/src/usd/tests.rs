@@ -443,7 +443,8 @@ def BrepArray "top" { }
     let layer = usda::parse(text).unwrap();
     assert_eq!(layer.meters_per_unit, Some(0.01));
     assert_eq!(layer.up_axis.as_deref(), Some("Z"));
-    let names: Vec<(&str, &str)> = layer.breps.iter().map(|b| (b.path.as_str(), b.name.as_str())).collect();
+    let paths: Vec<String> = layer.breps.iter().map(|b| layer.path(b.node)).collect();
+    let names: Vec<(&str, &str)> = paths.iter().zip(&layer.breps).map(|(p, b)| (p.as_str(), b.name.as_str())).collect();
     assert_eq!(names, [("/A/B/deep", "deep"), ("/top", "top")]);
     let deep = &layer.breps[0];
     assert_eq!(deep.attrs.get("brep:regionCount").and_then(|v| v.nums(1)), Some(&[1.0, 2.0, 3.0][..]));
@@ -454,8 +455,8 @@ def BrepArray "top" { }
     // Only the schema's own attributes are kept.
     assert!(deep.attrs.keys().all(|k| k.starts_with("brep:") || k.starts_with("edge:")), "{:?}", deep.attrs.keys().collect::<Vec<_>>());
     // Its translation has time samples, which are not followed.
-    assert_eq!(deep.xforms.len(), 1);
-    assert!(deep.xforms[0].animated);
+    assert!(layer.animated(deep.node));
+    assert_eq!(layer.chain(deep.node).len(), 1);
     assert!(layer.breps[1].attrs.is_empty());
 }
 
@@ -493,12 +494,13 @@ def Xform "A"
     let layer = usda::parse(text).unwrap();
     let b = &layer.breps[0];
     // The prim without an order has no effect, so only A and B are kept.
-    assert_eq!(b.xforms.len(), 2);
-    assert_eq!(b.xforms[0].order, ["xformOp:translate", "xformOp:translate:pivot", "!invert!xformOp:translate:pivot"]);
-    assert_eq!(b.xforms[0].ops.get("xformOp:translate:pivot").and_then(|v| v.nums(3)), Some(&[4.0, 5.0, 6.0][..]));
-    assert_eq!(b.xforms[1].order, ["!resetXformStack!", "xformOp:rotateZ"]);
-    assert_eq!(b.xforms[1].ops.get("xformOp:rotateZ").and_then(|v| v.as_f64()), Some(90.0));
-    assert!(!b.xforms[1].animated);
+    let chain = layer.chain(b.node);
+    assert_eq!(chain.len(), 2);
+    assert_eq!(chain[0].order, ["xformOp:translate", "xformOp:translate:pivot", "!invert!xformOp:translate:pivot"]);
+    assert_eq!(chain[0].ops.get("xformOp:translate:pivot").and_then(|v| v.nums(3)), Some(&[4.0, 5.0, 6.0][..]));
+    assert_eq!(chain[1].order, ["!resetXformStack!", "xformOp:rotateZ"]);
+    assert_eq!(chain[1].ops.get("xformOp:rotateZ").and_then(|v| v.as_f64()), Some(90.0));
+    assert!(!layer.animated(b.node));
 }
 
 // ---- Hostile files ---------------------------------------------------------------------------
@@ -881,70 +883,95 @@ fn placed(ops: &str) -> (([f64; 3], [f64; 3]), f64, f64) {
     (bbox(b), v, a)
 }
 
+/// `ops` on the plate: where its bounding box ends up, and its volume and area against the
+/// unplaced plate's, for a length factor (volume x f^3, area x f^2).
+fn check(ops: &str, min: [f64; 3], max: [f64; 3], factor: f64) {
+    let ((lo, hi), v, a) = placed(ops);
+    assert!(near(lo, min) && near(hi, max), "{ops}: box {lo:?} {hi:?}");
+    assert!(rel(v, PLATE_VOLUME * factor.powi(3)) < 3e-3, "{ops}: volume {v}");
+    assert!(rel(a, PLATE_AREA * factor * factor) < 3e-3, "{ops}: area {a}");
+}
+
+fn order(names: &str) -> String {
+    format!("    uniform token[] xformOpOrder = [{names}]")
+}
+
 #[test]
-fn operations_move_turn_and_scale_the_body() {
-    let order = |names: &str| format!("    uniform token[] xformOpOrder = [{names}]");
-    // (operations, bounding box min, bounding box max, volume and area factors)
-    let cases: Vec<(String, [f64; 3], [f64; 3], f64)> = vec![
-        (format!("    double3 xformOp:translate = (1, 2, 3)\n{}", order("\"xformOp:translate\"")), [1.0, 2.0, 3.0], [41.0, 32.0, 13.0], 1.0),
-        (format!("    double xformOp:rotateZ = 90\n{}", order("\"xformOp:rotateZ\"")), [-30.0, 0.0, 0.0], [0.0, 40.0, 10.0], 1.0),
-        (format!("    double3 xformOp:rotateXYZ = (90, 0, 0)\n{}", order("\"xformOp:rotateXYZ\"")), [0.0, -10.0, 0.0], [40.0, 0.0, 30.0], 1.0),
-        // X first, then Z: (x, y, z) -> (x, -z, y) -> (z, x, y).
-        (format!("    double3 xformOp:rotateXYZ = (90, 0, 90)\n{}", order("\"xformOp:rotateXYZ\"")), [0.0, 0.0, 0.0], [10.0, 40.0, 30.0], 1.0),
-        // Z first, then X: (x, y, z) -> (-y, x, z) -> (-y, -z, x).
-        (format!("    double3 xformOp:rotateZYX = (90, 0, 90)\n{}", order("\"xformOp:rotateZYX\"")), [-30.0, -10.0, 0.0], [0.0, 0.0, 40.0], 1.0),
-        (
-            format!("    quatf xformOp:orient = (0.7071067811865476, 0, 0, 0.7071067811865476)\n{}", order("\"xformOp:orient\"")),
-            [-30.0, 0.0, 0.0],
-            [0.0, 40.0, 10.0],
-            1.0,
-        ),
-        (format!("    double3 xformOp:scale = (2, 2, 2)\n{}", order("\"xformOp:scale\"")), [0.0, 0.0, 0.0], [80.0, 60.0, 20.0], 8.0),
-        // A matrix is written for row vectors: the move is in the last row.
-        (
-            format!(
-                "    matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (5, 6, 7, 1) )\n{}",
-                order("\"xformOp:transform\"")
-            ),
-            [5.0, 6.0, 7.0],
-            [45.0, 36.0, 17.0],
-            1.0,
-        ),
-        // The first operation is the outermost: scale, then turn, then move.
-        (
-            format!(
-                "    double3 xformOp:translate = (100, 0, 0)\n    double xformOp:rotateZ = 90\n    double3 xformOp:scale = (2, 2, 2)\n{}",
-                order("\"xformOp:translate\", \"xformOp:rotateZ\", \"xformOp:scale\"")
-            ),
-            [40.0, 0.0, 0.0],
-            [100.0, 80.0, 20.0],
-            8.0,
-        ),
-        // Turn about a pivot: move there, turn, move back.
-        (
-            format!(
-                "    double3 xformOp:translate:pivot = (20, 15, 0)\n    double xformOp:rotateZ = 90\n{}",
-                order("\"xformOp:translate:pivot\", \"xformOp:rotateZ\", \"!invert!xformOp:translate:pivot\"")
-            ),
-            [5.0, -5.0, 0.0],
-            [35.0, 35.0, 10.0],
-            1.0,
-        ),
-        // An operation and its inverse cancel; an operation not listed does nothing.
-        (
-            format!("    double3 xformOp:translate = (9, 9, 9)\n{}", order("\"xformOp:translate\", \"!invert!xformOp:translate\"")),
-            [0.0; 3],
-            [40.0, 30.0, 10.0],
-            1.0,
-        ),
-        ("    double3 xformOp:translate = (9, 9, 9)".to_string(), [0.0; 3], [40.0, 30.0, 10.0], 1.0),
-    ];
-    for (ops, min, max, factor) in cases {
-        let ((lo, hi), v, a) = placed(&ops);
-        assert!(near(lo, min) && near(hi, max), "{ops}: box {lo:?} {hi:?}");
-        assert!(rel(v, PLATE_VOLUME * factor) < 3e-3, "{ops}: volume {v}");
-        assert!(rel(a, PLATE_AREA * factor.powf(2.0 / 3.0)) < 3e-3, "{ops}: area {a}");
-    }
+fn translate_moves_the_body() {
+    check(&format!("    double3 xformOp:translate = (1, 2, 3)\n{}", order("\"xformOp:translate\"")), [1.0, 2.0, 3.0], [41.0, 32.0, 13.0], 1.0);
+}
+
+#[test]
+fn rotate_x_turns_the_body() {
+    // (x, y, z) -> (x, -z, y)
+    check(&format!("    double xformOp:rotateX = 90\n{}", order("\"xformOp:rotateX\"")), [0.0, -10.0, 0.0], [40.0, 0.0, 30.0], 1.0);
+}
+
+#[test]
+fn rotate_y_turns_the_body() {
+    // (x, y, z) -> (z, y, -x)
+    check(&format!("    double xformOp:rotateY = 90\n{}", order("\"xformOp:rotateY\"")), [0.0, 0.0, -40.0], [10.0, 30.0, 0.0], 1.0);
+}
+
+#[test]
+fn rotate_z_turns_the_body() {
+    // (x, y, z) -> (-y, x, z)
+    check(&format!("    double xformOp:rotateZ = 90\n{}", order("\"xformOp:rotateZ\"")), [-30.0, 0.0, 0.0], [0.0, 40.0, 10.0], 1.0);
+}
+
+#[test]
+fn rotate_xyz_turns_about_the_first_axis_first() {
+    // X, then Z: (x, y, z) -> (x, -z, y) -> (z, x, y).
+    check(&format!("    double3 xformOp:rotateXYZ = (90, 0, 90)\n{}", order("\"xformOp:rotateXYZ\"")), [0.0; 3], [10.0, 40.0, 30.0], 1.0);
+    // Z, then X: (x, y, z) -> (-y, x, z) -> (-y, -z, x).
+    check(&format!("    double3 xformOp:rotateZYX = (90, 0, 90)\n{}", order("\"xformOp:rotateZYX\"")), [-30.0, -10.0, 0.0], [0.0, 0.0, 40.0], 1.0);
+}
+
+#[test]
+fn orient_turns_by_a_quaternion() {
+    let q = "    quatf xformOp:orient = (0.7071067811865476, 0, 0, 0.7071067811865476)";
+    check(&format!("{q}\n{}", order("\"xformOp:orient\"")), [-30.0, 0.0, 0.0], [0.0, 40.0, 10.0], 1.0);
+}
+
+#[test]
+fn scale_scales_the_body() {
+    check(&format!("    double3 xformOp:scale = (2, 2, 2)\n{}", order("\"xformOp:scale\"")), [0.0; 3], [80.0, 60.0, 20.0], 2.0);
+}
+
+#[test]
+fn a_matrix_is_written_for_row_vectors() {
+    // The move is in the last row.
+    let m = "    matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (5, 6, 7, 1) )";
+    check(&format!("{m}\n{}", order("\"xformOp:transform\"")), [5.0, 6.0, 7.0], [45.0, 36.0, 17.0], 1.0);
+    // A turn: row 0 is where X goes. X -> Y, Y -> -X: a quarter turn about Z.
+    let m = "    matrix4d xformOp:transform = ( (0, 1, 0, 0), (-1, 0, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )";
+    check(&format!("{m}\n{}", order("\"xformOp:transform\"")), [-30.0, 0.0, 0.0], [0.0, 40.0, 10.0], 1.0);
+}
+
+#[test]
+fn the_first_operation_is_the_outermost() {
+    // Scale, then turn, then move.
+    let ops = format!(
+        "    double3 xformOp:translate = (100, 0, 0)\n    double xformOp:rotateZ = 90\n    double3 xformOp:scale = (2, 2, 2)\n{}",
+        order("\"xformOp:translate\", \"xformOp:rotateZ\", \"xformOp:scale\"")
+    );
+    check(&ops, [40.0, 0.0, 0.0], [100.0, 80.0, 20.0], 2.0);
+}
+
+#[test]
+fn a_pivot_turn_is_move_turn_move_back() {
+    let ops = format!(
+        "    double3 xformOp:translate:pivot = (20, 15, 0)\n    double xformOp:rotateZ = 90\n{}",
+        order("\"xformOp:translate:pivot\", \"xformOp:rotateZ\", \"!invert!xformOp:translate:pivot\"")
+    );
+    check(&ops, [5.0, -5.0, 0.0], [35.0, 35.0, 10.0], 1.0);
+}
+
+#[test]
+fn an_inverse_cancels_and_an_unlisted_operation_does_nothing() {
+    let ops = format!("    double3 xformOp:translate = (9, 9, 9)\n{}", order("\"xformOp:translate\", \"!invert!xformOp:translate\""));
+    check(&ops, [0.0; 3], [40.0, 30.0, 10.0], 1.0);
+    check("    double3 xformOp:translate = (9, 9, 9)", [0.0; 3], [40.0, 30.0, 10.0], 1.0);
 }
 
 #[test]
@@ -1017,17 +1044,21 @@ fn mirrors_give_the_mirrored_solid() {
 
 #[test]
 fn transforms_that_cannot_be_applied_leave_the_body_and_warn() {
-    let order = "    uniform token[] xformOpOrder = [\"xformOp:scale\"]";
     for (what, ops, said) in [
-        ("uneven scale", format!("    double3 xformOp:scale = (1, 2, 3)\n{order}"), "unevenly"),
-        ("zero scale", format!("    double3 xformOp:scale = (0, 0, 0)\n{order}"), "unevenly"),
-        ("huge scale", format!("    double3 xformOp:scale = (1e300, 1e300, 1e300)\n{order}"), "unevenly"),
-        ("scale of two", format!("    double3 xformOp:scale = (2, 2)\n{order}"), "numbers"),
-        ("NaN scale", format!("    double3 xformOp:scale = (nan, 1, 1)\n{order}"), "finite"),
-        ("projective matrix", "    matrix4d xformOp:transform = ((1, 0, 0, 1), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1))\n    uniform token[] xformOpOrder = [\"xformOp:transform\"]".to_string(), "affine"),
+        ("scale of two", "    double3 xformOp:scale = (2, 2)\n    uniform token[] xformOpOrder = [\"xformOp:scale\"]".to_string(), "numbers"),
+        ("NaN scale", "    double3 xformOp:scale = (nan, 1, 1)\n    uniform token[] xformOpOrder = [\"xformOp:scale\"]".to_string(), "finite"),
+        (
+            "projective matrix",
+            "    matrix4d xformOp:transform = ((1, 0, 0, 1), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1))\n    uniform token[] xformOpOrder = [\"xformOp:transform\"]".to_string(),
+            "affine",
+        ),
         ("unknown operation", "    double3 xformOp:wobble = (1, 1, 1)\n    uniform token[] xformOpOrder = [\"xformOp:wobble\"]".to_string(), "not supported"),
         ("singular inverse", "    double3 xformOp:scale = (0, 1, 1)\n    uniform token[] xformOpOrder = [\"!invert!xformOp:scale\"]".to_string(), "inverted"),
-        ("animated", "    double3 xformOp:translate.timeSamples = { 0: (1, 0, 0), 1: (9, 0, 0) }\n    uniform token[] xformOpOrder = [\"xformOp:translate\"]".to_string(), "time samples"),
+        (
+            "time samples",
+            "    double3 xformOp:translate.timeSamples = { 0: (1, 0, 0), 1: (9, 0, 0) }\n    uniform token[] xformOpOrder = [\"xformOp:translate\"]".to_string(),
+            "time samples",
+        ),
     ] {
         let (step, w) = usd_to_step(&world_with(PLATE, &ops)).unwrap();
         assert!(w.iter().any(|m| m.contains(said)), "{what}: {w:?}");
@@ -1035,4 +1066,94 @@ fn transforms_that_cannot_be_applied_leave_the_body_and_warn() {
         let (lo, hi) = bbox(&imp.bodies[0]);
         assert!(near(lo, [0.0; 3]) && near(hi, [40.0, 30.0, 10.0]), "{what}: {lo:?} {hi:?}");
     }
+}
+
+#[test]
+fn transforms_that_change_shapes_are_not_read_yet() {
+    let order = "    uniform token[] xformOpOrder = [\"xformOp:scale\"]";
+    for scale in ["(1, 2, 3)", "(0, 0, 0)", "(1e300, 1e300, 1e300)"] {
+        let text = world_with(PLATE, &format!("    double3 xformOp:scale = {scale}\n{order}"));
+        let e = rejected(scale, &text);
+        assert!(e.contains("not supported yet"), "{scale}: {e}");
+    }
+    // The other prims of the file are still read.
+    let start = PLATE.find("    def BrepArray \"Brep0\"").unwrap();
+    let end = PLATE.rfind("}\n").unwrap();
+    let squashed = PLATE[start..end].replace("\"Brep0\"", "\"Squashed\"").replacen(
+        "    {\n",
+        "    {\n        double3 xformOp:scale = (1, 2, 3)\n        uniform token[] xformOpOrder = [\"xformOp:scale\"]\n",
+        1,
+    );
+    let two = format!("{}{squashed}}}\n", &PLATE[..end]);
+    let (step, w) = usd_to_step(&two).unwrap();
+    assert!(w.iter().any(|m| m.contains("/World/Squashed") && m.contains("not supported yet")), "{w:?}");
+    assert_eq!(step_import(&step).unwrap().bodies.len(), 1);
+}
+
+// ---- Memory ---------------------------------------------------------------------------------
+
+/// What a small file must not be able to cost: a prim's path and its ancestors' transforms are
+/// shared by the prims below them, not copied into each, and every name and transform is capped.
+#[test]
+fn small_files_cannot_make_large_allocations() {
+    let started = std::time::Instant::now();
+    // A name of 1 MiB with 10,000 empty prims under it (10 GB if each prim copied its path).
+    let long = format!("#usda 1.0\ndef Xform \"{}\"\n{{\n{}}}\n", "a".repeat(1 << 20), "    def BrepArray \"b\" { }\n".repeat(10_000));
+    assert!(rejected("long ancestor name", &long).contains("longer than 256 bytes"));
+    let long_child = format!("#usda 1.0\ndef Xform \"x\"\n{{\n    def BrepArray \"{}\" {{ }}\n}}\n", "a".repeat(300));
+    assert!(rejected("long prim name", &long_child).contains("longer than 256 bytes"));
+    let long_prop = format!("#usda 1.0\ndef Xform \"x\"\n{{\n    double xformOp:{} = 1\n}}\n", "a".repeat(300));
+    assert!(rejected("long property name", &long_prop).contains("longer than 256 bytes"));
+
+    // A transform of millions of numbers, in a tuple and in a list, on an ancestor of 10,000 prims.
+    let children = "    def BrepArray \"b\" { }\n".repeat(10_000);
+    let numbers = vec!["0"; 3_000_000].join(",");
+    for value in [format!("({numbers})"), format!("[{numbers}]")] {
+        let text = format!(
+            "#usda 1.0\ndef Xform \"x\"\n{{\n    matrix4d xformOp:transform = {value}\n    uniform token[] xformOpOrder = [\"xformOp:transform\"]\n{children}}}\n"
+        );
+        assert!(rejected("a huge matrix", &text).contains("too many numbers"));
+    }
+    // The same in a matrix of 17 numbers, a list of 65 names, a name of 257 bytes, and 65 operations.
+    let m17 = vec!["0"; 17].join(",");
+    let text = format!("#usda 1.0\ndef Xform \"x\"\n{{\n    double3 xformOp:scale = ({m17})\n}}\n");
+    assert!(rejected("17 numbers", &text).contains("too many numbers"));
+    let names65 = vec!["\"xformOp:translate\""; 65].join(",");
+    let text = format!("#usda 1.0\ndef Xform \"x\"\n{{\n    uniform token[] xformOpOrder = [{names65}]\n}}\n");
+    assert!(rejected("65 names", &text).contains("too many strings"));
+    let text = format!("#usda 1.0\ndef Xform \"x\"\n{{\n    uniform token[] xformOpOrder = [\"{}\"]\n}}\n", "a".repeat(257));
+    assert!(rejected("a long operation name", &text).contains("too long"));
+    let ops: String = (0..65).map(|i| format!("    double xformOp:rotateZ:n{i} = 1\n")).collect();
+    let text = format!("#usda 1.0\ndef Xform \"x\"\n{{\n{ops}}}\n");
+    assert!(rejected("65 operations", &text).contains("transform operations"));
+    // A name of 300 bytes in `customData` is cut, not copied into every body's name.
+    let named = edit(
+        CUBE,
+        "customData = {\n            string source = \"\"\n        }",
+        &format!(
+            "customData = {{\n            dictionary solidcraft = {{\n                string name = \"{}\"\n            }}\n        }}",
+            "n".repeat(300)
+        ),
+    );
+    assert_eq!(import(&named).bodies[0].name.len(), 256);
+
+    // The most a file can nest: 60 ancestors with names of 256 bytes and a transform each, and
+    // 10,000 prims at the bottom. Each ancestor is held once, and each prim's transform comes
+    // from its parent's.
+    let name = "a".repeat(256);
+    let mut text = String::from("#usda 1.0\n");
+    for _ in 0..60 {
+        text.push_str(&format!(
+            "def Xform \"{name}\"\n{{\n    double3 xformOp:translate = (1, 0, 0)\n    uniform token[] xformOpOrder = [\"xformOp:translate\"]\n"
+        ));
+    }
+    text.push_str(&children);
+    text.push_str(&"}\n".repeat(60));
+    let layer = usda::parse(&text).unwrap();
+    assert_eq!(layer.breps.len(), 10_000);
+    assert_eq!(layer.node_count(), 60 + 10_000);
+    assert!(layer.path(layer.breps[0].node).len() > 60 * 256);
+    // Reading them all takes one product per prim, not one per ancestor and prim.
+    assert!(rejected("empty prims", &text).contains("nothing to read"));
+    assert!(started.elapsed().as_secs() < 20, "took {:?}", started.elapsed());
 }

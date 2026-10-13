@@ -101,8 +101,15 @@ pub struct StepFeature {
 /// Read STEP bytes (`file` is the source file name) into an Import base feature. The file is
 /// read once here to fail early and collect names; the feature holds the STEP text.
 pub fn step_import_feature(bytes: &[u8], file: &str) -> Result<StepFeature> {
-    if bytes.len() > MAX_STEP_BYTES {
-        return Err(IoError::Invalid(format!("STEP file too large ({} MB, limit {} MB)", bytes.len() >> 20, MAX_STEP_BYTES >> 20)));
+    let (kind, limit) = if is_usd_path(file) {
+        ("USD", solidcraft_kernel::MAX_USD_BYTES)
+    } else if is_iges_path(file) {
+        ("IGES", MAX_STEP_BYTES)
+    } else {
+        ("STEP", MAX_STEP_BYTES)
+    };
+    if bytes.len() > limit {
+        return Err(IoError::Invalid(format!("{kind} file too large ({} MB, limit {} MB)", bytes.len() >> 20, limit >> 20)));
     }
     // STEP is 7-bit text with escapes; tolerate stray 8-bit bytes. IGES and usd-brep are restated
     // as STEP (the feature keeps that STEP text).

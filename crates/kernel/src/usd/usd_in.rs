@@ -1229,15 +1229,24 @@ pub(super) fn translate(text: &str) -> R<(String, Vec<String>)> {
 
     let mut items: Vec<u64> = Vec::new();
     let mut styles: Vec<(u64, [f32; 3])> = Vec::new();
+    let mut worlds = xform::Worlds::new(&layer);
     for prim in &layer.breps {
-        let label = prim.path.as_str();
-        // The transform of the prim and its ancestors; one that cannot be applied leaves the body
-        // where the file puts its numbers.
-        if prim.xforms.iter().any(|x| x.animated) {
+        let path = layer.path(prim.node);
+        let label = path.as_str();
+        // The transform of the prim and its ancestors. One that is malformed leaves the body where
+        // the file puts its numbers; one that would change shapes is not read yet.
+        if layer.animated(prim.node) {
             w.add(format!("{label}: a transform with time samples is not followed"));
         }
-        let place = match xform::world(&prim.xforms).and_then(|m| m.map(|m| xform::Placement::of(&m)).transpose()) {
-            Ok(p) => p.unwrap_or(xform::Placement::NONE),
+        let place = match worlds.of(prim.node) {
+            Ok(None) => xform::Placement::NONE,
+            Ok(Some(m)) => match xform::Placement::of(&m) {
+                Ok(p) => p,
+                Err(e) => {
+                    w.add(format!("{label}: not read: not supported yet: {e}"));
+                    continue;
+                }
+            },
             Err(e) => {
                 w.add(format!("{label}: its transform is not applied ({e}); the model is placed as written"));
                 xform::Placement::NONE

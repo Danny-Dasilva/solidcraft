@@ -20,6 +20,12 @@ const MAX_STRINGS: usize = 8 << 20;
 const MAX_STRING: usize = 1 << 20;
 /// Most `BrepArray` prims kept.
 const MAX_PRIMS: usize = 10_000;
+/// Longest prim or property name, and longest name taken from `customData`.
+const MAX_NAME: usize = 256;
+/// Most numbers in a transform operation (a 4 x 4 matrix is the largest), most entries in
+/// `xformOpOrder`, and most transform operations on one prim.
+const MAX_OP_NUMBERS: usize = 16;
+const MAX_OPS: usize = 64;
 /// Longest `<path>` or `@asset@` read.
 const MAX_REFERENCE: usize = 1 << 16;
 
@@ -87,13 +93,21 @@ impl Value {
 /// A `def BrepArray` prim.
 #[derive(Debug)]
 pub(crate) struct BrepPrim {
-    pub path: String,
     pub name: String,
     pub attrs: HashMap<String, Value>,
-    /// The transform operations of the prim and its ancestors that have any, outermost first.
-    pub xforms: Vec<Xform>,
     /// The name in `customData` (`solidcraft:name`), if the prim has one.
     pub title: Option<String>,
+    /// The prim's place in the layer's tree of ancestors (`Layer::path`, `Layer::chain`).
+    pub node: usize,
+}
+
+/// A prim that holds a `BrepArray` or is an ancestor of one. Prims refer to their parents by
+/// index, so that many prims under one ancestor share its name and transform.
+#[derive(Debug)]
+pub(crate) struct Node {
+    name: String,
+    parent: Option<usize>,
+    xform: Xform,
 }
 
 #[derive(Debug, Default)]
@@ -101,6 +115,56 @@ pub(crate) struct Layer {
     pub meters_per_unit: Option<f64>,
     pub up_axis: Option<String>,
     pub breps: Vec<BrepPrim>,
+    nodes: Vec<Node>,
+}
+
+impl Layer {
+    /// The nodes from the root down to `node`.
+    fn ancestry(&self, node: usize) -> Vec<&Node> {
+        let mut out = Vec::new();
+        let mut at = Some(node);
+        while let Some(n) = at.and_then(|i| self.nodes.get(i)) {
+            out.push(n);
+            at = n.parent;
+            if out.len() > MAX_DEPTH + 2 {
+                break;
+            }
+        }
+        out.reverse();
+        out
+    }
+
+    /// The prim's path, `/World/Cube`.
+    pub(crate) fn path(&self, node: usize) -> String {
+        self.ancestry(node).iter().fold(String::new(), |p, n| format!("{p}/{}", n.name))
+    }
+
+    /// The node's own transform operations and its ancestors', outermost first, for those that
+    /// list any.
+    #[cfg(test)]
+    pub(crate) fn chain(&self, node: usize) -> Vec<&Xform> {
+        self.ancestry(node).into_iter().map(|n| &n.xform).filter(|x| !x.order.is_empty()).collect()
+    }
+
+    /// Whether the node or an ancestor has a transform operation with time samples.
+    pub(crate) fn animated(&self, node: usize) -> bool {
+        self.ancestry(node).iter().any(|n| n.xform.animated && !n.xform.order.is_empty())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// The node's parent.
+    pub(crate) fn parent(&self, node: usize) -> Option<usize> {
+        self.nodes.get(node).and_then(|n| n.parent)
+    }
+
+    /// The node's own transform operations.
+    pub(crate) fn xform(&self, node: usize) -> Option<&Xform> {
+        self.nodes.get(node).map(|n| &n.xform)
+    }
 }
 
 /// The transform operations one prim lists in `xformOpOrder`, with their values.
@@ -118,6 +182,8 @@ pub(crate) struct Xform {
 struct Frame {
     name: String,
     xform: Xform,
+    /// Its place in the layer's nodes, once a `BrepArray` below it needed one.
+    node: Option<usize>,
 }
 
 struct Meta {
@@ -149,13 +215,28 @@ struct P<'a> {
     pos: usize,
     numbers: usize,
     strings: usize,
+    /// The most numbers, strings, and bytes in a string that the value being read may have.
+    cap_numbers: usize,
+    cap_strings: usize,
+    cap_string_len: usize,
     layer: Layer,
     stack: Vec<Frame>,
 }
 
 /// Parse USD text. Only the stage metadata and the `BrepArray` prims are kept.
 pub(crate) fn parse(text: &str) -> R<Layer> {
-    let mut p = P { s: text, b: text.as_bytes(), pos: 0, numbers: 0, strings: 0, layer: Layer::default(), stack: Vec::new() };
+    let mut p = P {
+        s: text,
+        b: text.as_bytes(),
+        pos: 0,
+        numbers: 0,
+        strings: 0,
+        cap_numbers: usize::MAX,
+        cap_strings: usize::MAX,
+        cap_string_len: MAX_STRING,
+        layer: Layer::default(),
+        stack: Vec::new(),
+    };
     p.layer()?;
     Ok(p.layer)
 }
@@ -335,6 +416,9 @@ impl<'a> P<'a> {
             return self.err("expected a prim name in quotes");
         }
         let name = self.string()?;
+        if name.len() > MAX_NAME {
+            return self.err(format!("a prim name is longer than {MAX_NAME} bytes"));
+        }
         self.skip_ws();
         let meta = if self.peek() == Some(b'(') { self.metadata(false)? } else { Meta { active: true, title: None, interpolation: None } };
         let active = meta.active;
@@ -348,17 +432,42 @@ impl<'a> P<'a> {
         if collect && self.layer.breps.len() >= MAX_PRIMS {
             return self.err(format!("more than {MAX_PRIMS} BrepArray prims"));
         }
-        self.stack.push(Frame { name: name.clone(), xform: Xform::default() });
+        self.stack.push(Frame { name: name.clone(), xform: Xform::default(), node: None });
         let mut attrs = HashMap::new();
         let body = self.body(depth, live, collect, &mut attrs);
         let frame = self.stack.pop();
         body?;
+        let Some(frame) = frame else { return Ok(()) };
         if collect {
-            let path = format!("/{}", self.stack.iter().map(|f| f.name.as_str()).chain(std::iter::once(name.as_str())).collect::<Vec<_>>().join("/"));
-            let xforms: Vec<Xform> = self.stack.iter().chain(frame.as_ref()).map(|f| f.xform.clone()).filter(|x| !x.order.is_empty()).collect();
-            self.layer.breps.push(BrepPrim { path, name, attrs, xforms, title: meta.title });
+            let parent = self.register_ancestors();
+            let node = self.layer.nodes.len();
+            self.layer.nodes.push(Node { name: name.clone(), parent, xform: frame.xform });
+            self.layer.breps.push(BrepPrim { name, attrs, title: meta.title, node });
+        } else if let Some(i) = frame.node
+            && let Some(n) = self.layer.nodes.get_mut(i)
+        {
+            // The ancestor is read to its end: what it listed after its first child counts too.
+            n.xform = frame.xform;
         }
         Ok(())
+    }
+
+    /// Give every open prim a node, as the parent of the ones below it; the node of the innermost.
+    fn register_ancestors(&mut self) -> Option<usize> {
+        let mut parent = None;
+        for f in &mut self.stack {
+            let i = match f.node {
+                Some(i) => i,
+                None => {
+                    let i = self.layer.nodes.len();
+                    self.layer.nodes.push(Node { name: f.name.clone(), parent, xform: f.xform.clone() });
+                    f.node = Some(i);
+                    i
+                }
+            };
+            parent = Some(i);
+        }
+        parent
     }
 
     /// The statements of a prim, up to its closing brace.
@@ -421,12 +530,25 @@ impl<'a> P<'a> {
             }
             n
         };
+        if name.len() > MAX_NAME {
+            return self.err(format!("a property name is longer than {MAX_NAME} bytes"));
+        }
+        let is_op = name.starts_with("xformOp:") && !name.contains('.');
         let keep = (collect && KEPT.iter().any(|p| name.starts_with(p))) || name.starts_with("xformOp:") || name == "xformOpOrder";
         self.skip_ws();
         let mut value = Value::Other;
         if self.peek() == Some(b'=') {
             self.pos += 1;
-            value = self.value(keep, 0)?;
+            // A transform is a few numbers and a few names; more is refused as it is read.
+            let caps = (self.cap_numbers, self.cap_strings, self.cap_string_len);
+            if is_op {
+                (self.cap_numbers, self.cap_strings) = (MAX_OP_NUMBERS, 0);
+            } else if name == "xformOpOrder" {
+                (self.cap_numbers, self.cap_strings, self.cap_string_len) = (0, MAX_OPS, MAX_NAME);
+            }
+            let read = self.value(keep, 0);
+            (self.cap_numbers, self.cap_strings, self.cap_string_len) = caps;
+            value = read?;
         }
         self.skip_ws();
         let mut interpolation = None;
@@ -441,6 +563,8 @@ impl<'a> P<'a> {
             } else if name.starts_with("xformOp:") {
                 if name.contains('.') {
                     f.xform.animated = true;
+                } else if f.xform.ops.len() >= MAX_OPS {
+                    return self.err(format!("more than {MAX_OPS} transform operations on one prim"));
                 } else {
                     f.xform.ops.insert(name.clone(), value.clone());
                 }
@@ -508,6 +632,16 @@ impl<'a> P<'a> {
         }
     }
 
+    /// Keep a number of the value being read, within the caps.
+    fn push_number(&mut self, out: &mut Vec<f64>, x: f64) -> R<()> {
+        self.numbers += 1;
+        if self.numbers > MAX_NUMBERS || out.len() >= self.cap_numbers {
+            return self.err("too many numbers");
+        }
+        out.push(x);
+        Ok(())
+    }
+
     /// A tuple `(a, b, ...)`, nested tuples flattened, at its opening parenthesis. The numbers
     /// are appended to `out` (when `keep`) and counted; `None` when it holds anything else.
     fn tuple(&mut self, out: &mut Vec<f64>, keep: bool, depth: usize) -> R<Option<usize>> {
@@ -537,11 +671,7 @@ impl<'a> P<'a> {
                     let x = self.number()?;
                     count += 1;
                     if keep {
-                        self.numbers += 1;
-                        if self.numbers > MAX_NUMBERS {
-                            return self.err("too many numbers");
-                        }
-                        out.push(x);
+                        self.push_number(out, x)?;
                     }
                 }
                 Some(_) => {
@@ -550,11 +680,7 @@ impl<'a> P<'a> {
                         Value::Num(x) => {
                             count += 1;
                             if keep {
-                                self.numbers += 1;
-                                if self.numbers > MAX_NUMBERS {
-                                    return self.err("too many numbers");
-                                }
-                                out.push(x);
+                                self.push_number(out, x)?;
                             }
                         }
                         _ => numeric = false,
@@ -597,7 +723,7 @@ impl<'a> P<'a> {
                         acc.kind = Kind::Strs;
                         if keep {
                             self.strings += 1;
-                            if self.strings > MAX_STRINGS {
+                            if self.strings > MAX_STRINGS || acc.strs.len() >= self.cap_strings {
                                 return self.err("too many strings");
                             }
                             acc.strs.push(s);
@@ -610,11 +736,10 @@ impl<'a> P<'a> {
                     Value::Num(x) if matches!(acc.kind, Kind::Empty | Kind::Nums(1)) => {
                         acc.kind = Kind::Nums(1);
                         if keep {
-                            self.numbers += 1;
-                            if self.numbers > MAX_NUMBERS {
-                                return self.err("too many numbers");
-                            }
-                            acc.nums.push(x);
+                            let mut nums = std::mem::take(&mut acc.nums);
+                            let pushed = self.push_number(&mut nums, x);
+                            acc.nums = nums;
+                            pushed?;
                         }
                     }
                     _ => acc.kind = Kind::Other,
@@ -667,7 +792,7 @@ impl<'a> P<'a> {
                 return self.err("a string is not closed on its line");
             }
             out.push(c);
-            if out.len() > MAX_STRING {
+            if out.len() > self.cap_string_len {
                 return self.err("a string is too long");
             }
         }
@@ -741,6 +866,9 @@ impl<'a> P<'a> {
             let ty = self.word();
             self.skip_ws();
             let key = if matches!(self.peek(), Some(b'"') | Some(b'\'')) { self.string()? } else { self.word() };
+            if key.len() > MAX_NAME {
+                return self.err("a key in a dictionary is too long");
+            }
             self.skip_ws();
             if ty.is_empty() || key.is_empty() || self.peek() != Some(b'=') {
                 return self.err("unexpected text in a dictionary");
@@ -750,7 +878,10 @@ impl<'a> P<'a> {
             if self.peek() == Some(b'{') {
                 self.dictionary(&format!("{prefix}{key}:"), out, depth + 1)?;
             } else if let Value::Str(v) = self.value(false, depth + 1)? {
-                out.push((format!("{prefix}{key}"), v));
+                // Only SolidCraft's own name is wanted, and it is cut to a name's length.
+                if format!("{prefix}{key}") == "solidcraft:name" {
+                    out.push(("solidcraft:name".to_string(), cut_name(v)));
+                }
             }
         }
     }
@@ -785,4 +916,16 @@ impl<'a> P<'a> {
             }
         }
     }
+}
+
+/// A name cut to at most `MAX_NAME` bytes, at a character boundary.
+pub(crate) fn cut_name(mut s: String) -> String {
+    if s.len() > MAX_NAME {
+        let mut end = MAX_NAME;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+    }
+    s
 }

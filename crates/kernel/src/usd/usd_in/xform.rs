@@ -4,7 +4,9 @@
 //! so `[translate, rotateXYZ, scale]` scales a point first and translates it last: the product is
 //! `T * R * S`. A `matrix4d` is written for row vectors, so it is transposed.
 
-use super::super::usda::{Value, Xform};
+use std::collections::HashMap;
+
+use super::super::usda::{Layer, Value, Xform};
 use super::{R, V3, dot};
 
 pub(super) type Mat = [[f64; 4]; 4];
@@ -138,35 +140,77 @@ fn operation(name: &str, v: &Value) -> R<Mat> {
     Ok(m)
 }
 
-/// The matrix that places a prim's geometry in the stage, or `None` when it is the identity.
-pub(super) fn world(xforms: &[Xform]) -> R<Option<Mat>> {
-    let mut w = IDENTITY;
-    for x in xforms {
-        let mut local = IDENTITY;
-        for entry in &x.order {
-            if entry == "!resetXformStack!" {
-                w = IDENTITY;
-                continue;
-            }
-            let (invert_it, name) = match entry.strip_prefix("!invert!") {
-                Some(n) => (true, n),
-                None => (false, entry.as_str()),
-            };
-            // An operation that is listed but has no plain value (only time samples) is skipped.
-            let Some(v) = x.ops.get(name) else { continue };
-            let mut m = operation(name, v)?;
-            if invert_it {
-                m = invert(&m).ok_or_else(|| format!("{name} cannot be inverted"))?;
-            }
-            local = mul4(&local, &m);
+/// The matrix of one prim's own operations, and whether the prim restarts the transform stack
+/// instead of continuing its parent's.
+fn local(x: &Xform) -> R<(Mat, bool)> {
+    let mut local = IDENTITY;
+    let mut reset = false;
+    for entry in &x.order {
+        if entry == "!resetXformStack!" {
+            (local, reset) = (IDENTITY, true);
+            continue;
         }
-        w = mul4(&w, &local);
+        let (invert_it, name) = match entry.strip_prefix("!invert!") {
+            Some(n) => (true, n),
+            None => (false, entry.as_str()),
+        };
+        // An operation that is listed but has no plain value (only time samples) is skipped.
+        let Some(v) = x.ops.get(name) else { continue };
+        let mut m = operation(name, v)?;
+        if invert_it {
+            m = invert(&m).ok_or_else(|| format!("{name} cannot be inverted"))?;
+        }
+        local = mul4(&local, &m);
     }
-    if !w.iter().flatten().all(|x| x.is_finite()) {
-        return Err("the transform is not finite".into());
+    Ok((local, reset))
+}
+
+/// The matrices that place the geometry of a layer's prims in the stage, found once per prim
+/// from the prim's parent: many prims under one ancestor cost one product each.
+pub(super) struct Worlds<'a> {
+    layer: &'a Layer,
+    done: HashMap<usize, R<Option<Mat>>>,
+}
+
+impl<'a> Worlds<'a> {
+    pub(super) fn new(layer: &'a Layer) -> Self {
+        Worlds { layer, done: HashMap::new() }
     }
-    let same = w.iter().zip(&IDENTITY).all(|(a, b)| a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-12));
-    Ok((!same).then_some(w))
+
+    /// The matrix for the node, or `None` when it is the identity.
+    pub(super) fn of(&mut self, node: usize) -> R<Option<Mat>> {
+        // The nodes from `node` up to the first one already done.
+        let mut todo = Vec::new();
+        let mut at = Some(node);
+        while let Some(i) = at {
+            if self.done.contains_key(&i) {
+                break;
+            }
+            todo.push(i);
+            at = self.layer.parent(i);
+            if todo.len() > 1024 {
+                return Err("prims are nested too deeply".into());
+            }
+        }
+        let mut above: R<Option<Mat>> = at.and_then(|i| self.done.get(&i).cloned()).unwrap_or(Ok(None));
+        for &i in todo.iter().rev() {
+            let world = match self.layer.xform(i).filter(|x| !x.order.is_empty()) {
+                None => above.clone(),
+                Some(x) => local(x).and_then(|(m, reset)| {
+                    let parent = if reset { None } else { above.clone()? };
+                    let w = parent.map_or(m, |p| mul4(&p, &m));
+                    if !w.iter().flatten().all(|x| x.is_finite()) {
+                        return Err("the transform is not finite".into());
+                    }
+                    let same = w.iter().zip(&IDENTITY).all(|(a, b)| a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-12));
+                    Ok((!same).then_some(w))
+                }),
+            };
+            self.done.insert(i, world.clone());
+            above = world;
+        }
+        above
+    }
 }
 
 /// A transform that keeps shapes: a rotation, a mirror, a uniform scale, a move.
@@ -197,7 +241,7 @@ impl Placement {
             && dot(c0, c2).abs() <= 1e-9 * s * s
             && dot(c1, c2).abs() <= 1e-9 * s * s;
         if !(s > 1e-9 && s < 1e9 && square) {
-            return Err("only rotations, mirrors, moves and uniform scales are applied; this transform scales unevenly or shears".into());
+            return Err("a transform that scales unevenly or shears, or whose scale is zero or huge (only rotations, mirrors, moves and one scale in all directions are applied)".into());
         }
         let cross = [c0[1] * c1[2] - c0[2] * c1[1], c0[2] * c1[0] - c0[0] * c1[2], c0[0] * c1[1] - c0[1] * c1[0]];
         Ok(Placement { l, t: [m[0][3], m[1][3], m[2][3]], s, mirror: dot(cross, c2) < 0.0 })

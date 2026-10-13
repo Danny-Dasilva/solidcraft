@@ -12,7 +12,12 @@ use crate::SolveApp;
 /// new design): offer to stand them up.
 pub fn offer(app: &mut SolveApp, path: &str, before: &[String]) {
     let io = &solidcraft_engine::io::is_step_path;
-    if !(io(path) || solidcraft_engine::io::is_iges_path(path)) || !app.preferences.offer_stand_up || app.preferences.up_axis != "z" {
+    // USD files state their up axis (`upAxis`); the importer warns when it is Y.
+    if !(io(path) || solidcraft_engine::io::is_iges_path(path))
+        || solidcraft_engine::io::is_usd_path(path)
+        || !app.preferences.offer_stand_up
+        || app.preferences.up_axis != "z"
+    {
         return;
     }
     let bodies: Vec<String> = app.session.world_state().bodies.iter().map(|b| b.name.clone()).filter(|n| !before.contains(n)).collect();

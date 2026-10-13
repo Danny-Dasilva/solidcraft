@@ -1242,6 +1242,18 @@ fn u32_of(x: usize) -> Result<u32> {
     }
 }
 
+impl Arrays {
+    /// Every number to be written is finite (checked here, not in the text, where a body's name
+    /// may spell "NaN" or "inf").
+    fn finite(&self) -> bool {
+        let ana = |a: &Ana| [&a.o, &a.z, &a.x].iter().all(|v| v.iter().all(|p| finite3(*p))) && a.k1.iter().chain(&a.k2).all(|x| x.is_finite());
+        [&self.tol, &self.edge_range, &self.cv_knots, &self.cv_w, &self.s_ku, &self.s_kv, &self.s_w].iter().all(|v| v.iter().all(|x| x.is_finite()))
+            && [&self.extent, &self.verts, &self.cv, &self.s_cv].iter().all(|v| v.iter().all(|p| finite3(*p)))
+            && self.face_range.iter().all(|r| r.iter().all(|x| x.is_finite()))
+            && [&self.plane, &self.cyl, &self.cone, &self.sphere, &self.torus].into_iter().all(ana)
+    }
+}
+
 const SAME: &str = "same";
 const OPPOSITE: &str = "opposite";
 
@@ -1477,6 +1489,9 @@ fn quoted(s: &str) -> String {
 
 /// One `def BrepArray` prim for the brep in `a`; `label` is the body's own name.
 fn render(a: &Arrays, ident: &str, label: &str, color: Option<[f32; 3]>) -> Result<String> {
+    if !a.finite() {
+        return fail("a number is not finite");
+    }
     let mut apis = vec!["BrepPointAPI:vertexPoint".to_string(), "BrepCurve3dNurbAPI:edge3dNurb".to_string()];
     for (used, api) in [
         (!a.s_nu.is_empty(), "BrepSurfaceNurbAPI"),
@@ -1592,9 +1607,6 @@ fn render(a: &Arrays, ident: &str, label: &str, color: Option<[f32; 3]>) -> Resu
         o.push_str("        uniform token primvars:displayColor:interpolation = \"constant\"\n");
     }
     o.push_str("    }\n");
-    if o.contains("NaN") || o.contains("inf") {
-        return fail("a number is not finite");
-    }
     Ok(o)
 }
 
@@ -1610,12 +1622,10 @@ fn shell_ref(s: &S, id: u64) -> Result<(u64, bool)> {
     }
 }
 
-/// USD text (`.usda`, millimetres, Z up) holding every body as a `BrepArray` brep.
-pub fn usd_export_bodies(bodies: &[ExportBody], header: &StepHeader) -> Result<String> {
-    if bodies.is_empty() {
-        return Err(KernelError::Invalid("nothing to export".into()));
-    }
-    let step = crate::step_export_bodies(bodies, header)?;
+/// The breps of one body's STEP export: one for each solid (a body in several pieces writes
+/// several) or sheet, packed in one set of arrays.
+fn body_arrays(body: &ExportBody, header: &StepHeader) -> Result<Arrays> {
+    let step = crate::step_export_bodies(std::slice::from_ref(body), header)?;
     let ex = p21::parse(&step).map_err(|e| KernelError::Failed(format!("USD export: {e}")))?;
     let s = S { ex: &ex };
     let mut max_coord: f64 = 1.0;
@@ -1634,12 +1644,8 @@ pub fn usd_export_bodies(bodies: &[ExportBody], header: &StepHeader) -> Result<S
         .map(|(i, _)| *i)
         .collect();
     items.sort_unstable();
-    // One prim per body, in the order the STEP writer wrote them (its order is the bodies' order).
-    let by_order = items.len() == bodies.len();
-    let mut used = HashSet::new();
-    let mut out =
-        String::from("#usda 1.0\n(\n    defaultPrim = \"World\"\n    metersPerUnit = 0.001\n    upAxis = \"Z\"\n)\n\ndef Xform \"World\"\n{\n");
-    for (k, id) in items.into_iter().enumerate() {
+    let mut arrays = Arrays::default();
+    for id in items {
         let e = s.e(id)?;
         let (shells, sheet) = match e.name() {
             "SHELL_BASED_SURFACE_MODEL" => {
@@ -1655,14 +1661,25 @@ pub fn usd_export_bodies(bodies: &[ExportBody], header: &StepHeader) -> Result<S
                 (v, false)
             }
         };
-        let model = build_model(&s, &shells, sheet, tol)?;
-        let mut arrays = Arrays::default();
-        append(&mut arrays, &model)?;
-        let (label, color) = match bodies.get(k).filter(|_| by_order) {
-            Some(b) => (b.name.clone(), b.color),
-            None => (e.params().first().and_then(Param::as_str).unwrap_or("").to_string(), None),
-        };
-        out.push_str(&render(&arrays, &identifier(&label, &mut used), &label, color)?);
+        append(&mut arrays, &build_model(&s, &shells, sheet, tol)?)?;
+    }
+    Ok(arrays)
+}
+
+/// USD text (`.usda`, millimetres, Z up) with one `BrepArray` prim for each body.
+///
+/// Each body is exported to STEP on its own, so a prim always holds the solids of the body it is
+/// named after and coloured for (a body in several pieces gives one prim with several breps; a
+/// body that writes no solid gives no prim).
+pub fn usd_export_bodies(bodies: &[ExportBody], header: &StepHeader) -> Result<String> {
+    let mut used = HashSet::new();
+    let mut out =
+        String::from("#usda 1.0\n(\n    defaultPrim = \"World\"\n    metersPerUnit = 0.001\n    upAxis = \"Z\"\n)\n\ndef Xform \"World\"\n{\n");
+    for body in bodies {
+        let arrays = body_arrays(body, header)?;
+        if !arrays.regions.is_empty() {
+            out.push_str(&render(&arrays, &identifier(&body.name, &mut used), &body.name, body.color)?);
+        }
     }
     if used.is_empty() {
         return Err(KernelError::Invalid("nothing to export".into()));
@@ -2485,11 +2502,16 @@ mod tests {
             let (step, warnings) = crate::usd::usd_in::usd_to_step(&text).unwrap();
             let imp = step_import(&step).unwrap();
             assert!(warnings.is_empty() && imp.warnings.is_empty(), "{name}: {warnings:?} {:?}", imp.warnings);
-            assert_eq!(imp.bodies.len(), 1, "{name}");
-            let (m0, m1) = (measure(b).unwrap(), measure(&imp.bodies[0].body).unwrap());
-            assert!(rel(m1.volume, m0.volume) < 2e-3, "{name}: volume {} vs {}", m1.volume, m0.volume);
-            assert!(rel(m1.area, m0.area) < 2e-3, "{name}: area {} vs {}", m1.area, m0.area);
-            assert!(imp.bodies[0].closed, "{name} reads back closed");
+            // A body in two pieces (the cut ring) may come back as its two bodies: compare the whole.
+            assert!(!imp.bodies.is_empty(), "{name}");
+            let m0 = measure(b).unwrap();
+            let (volume, area) = imp.bodies.iter().fold((0.0, 0.0), |(v, a), x| {
+                let m = measure(&x.body).unwrap();
+                (v + m.volume, a + m.area)
+            });
+            assert!(rel(volume, m0.volume) < 2e-3, "{name}: volume {volume} vs {}", m0.volume);
+            assert!(rel(area, m0.area) < 2e-3, "{name}: area {area} vs {}", m0.area);
+            assert!(imp.bodies.iter().all(|x| x.closed), "{name} reads back closed");
         }
     }
 
@@ -2565,6 +2587,45 @@ mod tests {
             }
         }
         assert!(seams >= 4, "the sphere, ball, torus and others get seams ({seams})");
+    }
+
+    /// A body's name is text, not a number: "Info", "Reinforcement" and "NaN part" hold "inf" and
+    /// "NaN" and must not look like a number that is not finite.
+    #[test]
+    fn names_that_spell_nan_or_inf_export() {
+        let b = box_solid(Vec3::ZERO, Vec3::new(10.0, 20.0, 30.0)).unwrap();
+        let names = ["Info", "Reinforcement", "NaN part", "Infill", "inf", "nan"];
+        let bodies: Vec<(&str, &Body)> = names.iter().map(|n| (*n, &b)).collect();
+        let t = export(&bodies);
+        let ds = check_all(&t);
+        assert_eq!(ds.len(), names.len());
+        let ps = prims(&t);
+        for (p, n) in ps.iter().zip(names) {
+            assert!(p.contains(&format!("string name = {}", quoted(n))), "{n}");
+        }
+        assert!(ps[2].starts_with("    def BrepArray \"NaN_part\" ("));
+    }
+
+    /// Each body is exported on its own, so its prim has its own pieces, name and colour: a body
+    /// in two pieces next to a single one is two prims (the first with two breps), not three.
+    #[test]
+    fn a_body_in_two_pieces_stays_one_prim_with_its_own_colour() {
+        let a = box_solid(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)).unwrap();
+        let b = box_solid(Vec3::new(50.0, 0.0, 0.0), Vec3::new(60.0, 10.0, 10.0)).unwrap();
+        let pair = crate::union_apart(&[a.clone(), b]).unwrap().expect("two boxes far apart are one body of two pieces");
+        let bodies = [
+            ExportBody { name: "Pair".into(), body: &pair, color: Some([1.0, 0.0, 0.0]) },
+            ExportBody { name: "Single".into(), body: &a, color: Some([0.0, 0.0, 1.0]) },
+        ];
+        let t = usd_export_bodies(&bodies, &StepHeader::default()).unwrap();
+        let ds = check_all(&t);
+        let ps = prims(&t);
+        assert_eq!(ds.len(), 2, "{t}");
+        assert!(ps[0].starts_with("    def BrepArray \"Pair\" (") && ps[1].starts_with("    def BrepArray \"Single\" ("));
+        assert_eq!(ds[0].u("brep:regionCount"), [2, 2]);
+        assert_eq!(ds[1].u("brep:regionCount"), [2]);
+        assert!(ps[0].contains("primvars:displayColor = [(1.0, 0.0, 0.0)]"));
+        assert!(ps[1].contains("primvars:displayColor = [(0.0, 0.0, 1.0)]"));
     }
 
     #[test]
