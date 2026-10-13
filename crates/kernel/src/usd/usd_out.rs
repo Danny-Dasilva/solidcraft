@@ -2413,6 +2413,23 @@ mod tests {
     }
 
     /// Bodies covering every kind of face and shell the exporter writes.
+    /// `f` over `items` on one thread each, in order. The sample bodies are independent, and
+    /// building, exporting and reading them back one at a time made these the slowest tests.
+    fn par<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+        std::thread::scope(|s| {
+            let f = &f;
+            let hs: Vec<_> = items.iter().map(|x| s.spawn(move || f(x))).collect();
+            hs.into_iter().map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
+        })
+    }
+
+    /// The sample bodies with their export, made once per test binary: the STEP export under the
+    /// USD export takes seconds on the boolean results, and several tests read the same files.
+    fn exported_samples() -> &'static [(&'static str, Body, String)] {
+        static SAMPLES: std::sync::OnceLock<Vec<(&'static str, Body, String)>> = std::sync::OnceLock::new();
+        SAMPLES.get_or_init(|| par(&sample_bodies(), |(name, body)| (*name, body.clone(), export(&[(name, body)]))))
+    }
+
     fn sample_bodies() -> Vec<(&'static str, Body)> {
         use crate::{extrude_tapered, loft, revolve};
         use solidcraft_geom::{Loop2, Plane, Region2, Seg2, Vec2};
@@ -2444,49 +2461,55 @@ mod tests {
         };
         let triangle = Loop2::polygon(&[Vec2::ZERO, Vec2::new(5.0, 0.0), Vec2::new(0.0, 10.0)]);
         let trapezoid = Loop2::polygon(&[Vec2::new(0.0, 4.0), Vec2::new(3.0, 5.0), Vec2::new(3.0, 12.0), Vec2::new(0.0, 12.0)]);
-        vec![
-            ("box", box_solid(Vec3::ZERO, Vec3::new(10.0, 20.0, 30.0)).unwrap()),
-            ("cylinder", cylinder(Vec3::new(1.0, 2.0, 3.0), Vec3::new(0.0, 1.0, 1.0), 5.0, 12.0).unwrap()),
-            ("sphere", sphere(Vec3::new(1.0, 2.0, 3.0), 10.0).unwrap()),
-            ("torus", torus(Vec3::ZERO, 20.0, 4.0).unwrap()),
-            ("holed", boolean(&plate(), &pin, BoolOp::Cut).unwrap().unwrap()),
-            ("rounded", fillet(&plate(), &[Vec3::new(20.0, 0.0, 10.0)], 3.0).unwrap()),
-            ("cavity", boolean(&blk, &box_solid(Vec3::new(5.0, 5.0, 5.0), Vec3::new(15.0, 15.0, 15.0)).unwrap(), BoolOp::Cut).unwrap().unwrap()),
-            ("donut", revolve(&Plane::XZ, &[ring], Vec2::ZERO, Vec2::Y, 1.5).unwrap().pop().unwrap()),
-            ("wavy", revolve(&Plane::XZ, &[Region2 { outer: wave, holes: vec![] }], Vec2::ZERO, Vec2::Y, TAU).unwrap().pop().unwrap()),
-            ("tapered", extrude_tapered(&Plane::XY, &disc, 10.0, 1.0, 0.1).unwrap()),
-            ("lofted", loft(&[(Plane::XY, Loop2::circle(Vec2::ZERO, 6.0)), (top, Loop2::circle(Vec2::ZERO, 3.0))]).unwrap()),
-            ("ball", revolve(&Plane::XZ, &[Region2 { outer: half_disc, holes: vec![] }], Vec2::ZERO, Vec2::Y, TAU).unwrap().pop().unwrap()),
-            ("dome", revolve(&Plane::XZ, &[Region2 { outer: quarter_disc, holes: vec![] }], Vec2::ZERO, Vec2::Y, TAU).unwrap().pop().unwrap()),
-            ("cone", revolve(&Plane::XZ, &[Region2 { outer: triangle, holes: vec![] }], Vec2::ZERO, Vec2::Y, TAU).unwrap().pop().unwrap()),
-            ("frustum", revolve(&Plane::XZ, &[Region2 { outer: trapezoid, holes: vec![] }], Vec2::ZERO, Vec2::Y, TAU).unwrap().pop().unwrap()),
-            (
-                "bowl",
+        let builders: [(&str, &(dyn Fn() -> Body + Sync)); 18] = [
+            ("box", &|| box_solid(Vec3::ZERO, Vec3::new(10.0, 20.0, 30.0)).unwrap()),
+            ("cylinder", &|| cylinder(Vec3::new(1.0, 2.0, 3.0), Vec3::new(0.0, 1.0, 1.0), 5.0, 12.0).unwrap()),
+            ("sphere", &|| sphere(Vec3::new(1.0, 2.0, 3.0), 10.0).unwrap()),
+            ("torus", &|| torus(Vec3::ZERO, 20.0, 4.0).unwrap()),
+            ("holed", &|| boolean(&plate(), &pin, BoolOp::Cut).unwrap().unwrap()),
+            ("rounded", &|| fillet(&plate(), &[Vec3::new(20.0, 0.0, 10.0)], 3.0).unwrap()),
+            ("cavity", &|| boolean(&blk, &box_solid(Vec3::new(5.0, 5.0, 5.0), Vec3::new(15.0, 15.0, 15.0)).unwrap(), BoolOp::Cut).unwrap().unwrap()),
+            ("donut", &|| revolve(&Plane::XZ, std::slice::from_ref(&ring), Vec2::ZERO, Vec2::Y, 1.5).unwrap().pop().unwrap()),
+            ("wavy", &|| revolve(&Plane::XZ, &[Region2 { outer: wave.clone(), holes: vec![] }], Vec2::ZERO, Vec2::Y, TAU).unwrap().pop().unwrap()),
+            ("tapered", &|| extrude_tapered(&Plane::XY, &disc, 10.0, 1.0, 0.1).unwrap()),
+            ("lofted", &|| loft(&[(Plane::XY, Loop2::circle(Vec2::ZERO, 6.0)), (top, Loop2::circle(Vec2::ZERO, 3.0))]).unwrap()),
+            ("ball", &|| {
+                revolve(&Plane::XZ, &[Region2 { outer: half_disc.clone(), holes: vec![] }], Vec2::ZERO, Vec2::Y, TAU).unwrap().pop().unwrap()
+            }),
+            ("dome", &|| {
+                revolve(&Plane::XZ, &[Region2 { outer: quarter_disc.clone(), holes: vec![] }], Vec2::ZERO, Vec2::Y, TAU).unwrap().pop().unwrap()
+            }),
+            ("cone", &|| {
+                revolve(&Plane::XZ, &[Region2 { outer: triangle.clone(), holes: vec![] }], Vec2::ZERO, Vec2::Y, TAU).unwrap().pop().unwrap()
+            }),
+            ("frustum", &|| {
+                revolve(&Plane::XZ, &[Region2 { outer: trapezoid.clone(), holes: vec![] }], Vec2::ZERO, Vec2::Y, TAU).unwrap().pop().unwrap()
+            }),
+            ("bowl", &|| {
                 boolean(
                     &sphere(Vec3::ZERO, 10.0).unwrap(),
                     &box_solid(Vec3::new(-20.0, -20.0, 3.0), Vec3::new(20.0, 20.0, 20.0)).unwrap(),
                     BoolOp::Cut,
                 )
                 .unwrap()
-                .unwrap(),
-            ),
-            (
-                "bored_ball",
+                .unwrap()
+            }),
+            ("bored_ball", &|| {
                 boolean(&sphere(Vec3::ZERO, 10.0).unwrap(), &cylinder(Vec3::new(2.0, 1.0, -20.0), Vec3::Z, 3.0, 40.0).unwrap(), BoolOp::Cut)
                     .unwrap()
-                    .unwrap(),
-            ),
-            (
-                "cut_ring",
+                    .unwrap()
+            }),
+            ("cut_ring", &|| {
                 boolean(
                     &torus(Vec3::ZERO, 20.0, 4.0).unwrap(),
                     &box_solid(Vec3::new(-5.0, -30.0, -10.0), Vec3::new(5.0, 30.0, 10.0)).unwrap(),
                     BoolOp::Cut,
                 )
                 .unwrap()
-                .unwrap(),
-            ),
-        ]
+                .unwrap()
+            }),
+        ];
+        par(&builders, |(name, build)| (*name, build()))
     }
 
     /// The whole way round: what the importer reads back from the export has the volume and
@@ -2495,11 +2518,9 @@ mod tests {
     fn exported_bodies_read_back_with_the_same_volume() {
         use crate::{measure, step_import};
         let rel = |a: f64, b: f64| (a - b).abs() / b.abs().max(1e-9);
-        let bodies = sample_bodies();
-        for (name, b) in &bodies {
-            let text = export(&[(name, b)]);
-            check(&text);
-            let (step, warnings) = crate::usd::usd_in::usd_to_step(&text).unwrap();
+        par(exported_samples(), |(name, b, text)| {
+            check(text);
+            let (step, warnings) = crate::usd::usd_in::usd_to_step(text).unwrap();
             let imp = step_import(&step).unwrap();
             assert!(warnings.is_empty() && imp.warnings.is_empty(), "{name}: {warnings:?} {:?}", imp.warnings);
             // A body in two pieces (the cut ring) may come back as its two bodies: compare the whole.
@@ -2512,7 +2533,7 @@ mod tests {
             assert!(rel(volume, m0.volume) < 2e-3, "{name}: volume {volume} vs {}", m0.volume);
             assert!(rel(area, m0.area) < 2e-3, "{name}: area {area} vs {}", m0.area);
             assert!(imp.bodies.iter().all(|x| x.closed), "{name} reads back closed");
-        }
+        });
     }
 
     /// A reader that works trims out from the 3D edges (NVIDIA's SMLib does, for analytic faces)
@@ -2523,11 +2544,11 @@ mod tests {
     #[test]
     fn sphere_and_torus_faces_close_in_their_parameter_box() {
         let mut seams = 0;
-        for (name, body) in sample_bodies() {
-            if !["sphere", "torus", "ball", "dome", "bowl", "bored_ball", "cut_ring"].contains(&name) {
+        for (name, _, text) in exported_samples() {
+            if !["sphere", "torus", "ball", "dome", "bowl", "bored_ball", "cut_ring"].contains(name) {
                 continue;
             }
-            let d = check(&export(&[(name, &body)]));
+            let d = check(text);
             let (eu_edge, eu_or) = (d.u("edgeuse:edgeIndex"), d.t("edgeuse:orientationType"));
             let (lc, ec) = (d.u("face:loopCount"), d.u("loop:edgeuseCount"));
             let mut kinds: HashMap<String, usize> = HashMap::new();

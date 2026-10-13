@@ -1021,10 +1021,19 @@ fn mirrors_give_the_mirrored_solid() {
     // Planes with a round hole (analytic), a B-spline cone and two B-spline hemispheres (both
     // recognised), a B-spline solid, and a rounded box (cylinders and tori).
     let bodies = [("plate", PLATE), ("cone", CONE), ("hemispheres", SPHERE), ("mouse", MOUSE), ("rounded box", LIBRARY[4].1)];
-    for (what, text) in bodies {
+    // One thread per body: twenty imports one after another made this one of the slowest tests.
+    std::thread::scope(|scope| {
+        for (what, text) in bodies {
+            scope.spawn(move || mirrored(what, text, &mirrors));
+        }
+    });
+}
+
+fn mirrored(what: &str, text: &str, mirrors: &[&str]) {
+    {
         let plain = import(text);
         let (v0, a0) = props(&plain.bodies[0]);
-        for ops in mirrors {
+        for ops in mirrors.iter().copied() {
             let k = if ops.contains("-3, -3, 3") { 3.0 } else { 1.0 };
             let imp = import(&world_with(text, ops));
             assert!(imp.warnings.is_empty(), "{what}: {:?}", imp.warnings);
