@@ -1,0 +1,57 @@
+#usda 1.0
+
+def Xform "World"
+{
+    def BrepArray "Brep0" (
+        prepend apiSchemas = ["BrepPointAPI:vertexPoint", "BrepCurve3dNurbAPI:edge3dNurb", "BrepSurfacePlaneAPI", "BrepSurfaceConeAPI"]
+        customData = {
+            string source = ""
+        }
+    )
+    {
+        uniform point3d[] brep:edge3dNurb:curve3d:nurb:controlVertices = [(7, 2, 3), (3, 2, 13), (3, 2, 13), (1, 2, 13), (1, 2, 3), (1, 2, 13), (1, 2, 3), (7, 2, 3), (1, 2, 3), (-4.638155724715451, -0.05212085995401239, 3), (-4.638155724715451, -0.05212085995401239, 3), (-0.8793852415718169, 1.3159597133486622, 13), (-0.8793852415718169, 1.3159597133486622, 13), (1, 2, 13), (7, 2, 3), (6.999999999999999, 5.946262079932703, 2.9999999999999996), (3.37647859623494, 7.509296641281645, 3), (-0.24704280753011934, 9.072331202630586, 2.9999999999999996), (-3.1174498272124023, 6.364241849438291, 3), (-5.987856846894686, 3.6561524962459964, 2.9999999999999996), (-4.63815572471545, -0.052120859954014165, 3), (3.0000000000000018, 2, 13), (3.0000000000000018, 3.315420693310902, 13), (1.7921595320783144, 3.836432213760549, 13), (0.5843190641566275, 4.357443734210196, 13), (-0.3724832757374676, 3.454747283146097, 13), (-1.3292856156315622, 2.5520508320819983, 13), (-0.8793852415718167, 1.3159597133486611, 13)]
+        uniform double[] brep:edge3dNurb:curve3d:nurb:knots = [0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0.3333333333333333, 0.3333333333333333, 0.6666666666666666, 0.6666666666666666, 1, 1, 1, 0, 0, 0, 0.3333333333333333, 0.3333333333333333, 0.6666666666666666, 0.6666666666666666, 1, 1, 1]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:order = [2, 2, 2, 2, 2, 2, 2, 3, 3]
+        uniform uint[] brep:edge3dNurb:curve3d:nurb:vertexCount = [2, 2, 2, 2, 2, 2, 2, 7, 7]
+        uniform double[] brep:edge3dNurb:curve3d:nurb:weights = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0.8354878114129364, 1, 0.8354878114129364, 1, 0.8354878114129364, 1, 1, 0.8354878114129364, 1, 0.8354878114129364, 1, 0.8354878114129364, 1]
+        uniform double3[] brep:extent = [(-5.987866846894686, -0.05213085995401916, 2.9999899999999933), (7.000010000000001, 9.072341202630586, 13.000015591692554)]
+        uniform double[] brep:intersectTol3d = [0.00003118338510833318]
+        uniform uint[] brep:regionCount = [2]
+        uniform vector3d[] brep:surface:cone:axis = [(-1.643460219210442e-32, 8.881784197001254e-17, 1)]
+        uniform point3d[] brep:surface:cone:origin = [(1.0000000000000007, 1.999999999999999, 3)]
+        uniform double[] brep:surface:cone:radius = [6]
+        uniform vector3d[] brep:surface:cone:refDirection = [(1, 1.8503717077085946e-16, 0)]
+        uniform double[] brep:surface:cone:semiAngle = [-0.3805063771123649]
+        uniform vector3d[] brep:surface:plane:axis = [(0, -1, 0), (0.3420201433256686, -0.9396926207859084, 0), (0, 0, -1), (0, 0, 1)]
+        uniform point3d[] brep:surface:plane:origin = [(10.41404708432983, 2, 1.5859529156701688), (-7.846310576875839, -1.2197937330570818, 1.5859529156701688), (-5.6000000000000005, -4.6000000000000005, 3), (-1.2000000000000002, -0.20000000000000018, 13)]
+        uniform vector3d[] brep:surface:plane:refDirection = [(0, 0, 1), (0.9396926207859084, 0.3420201433256686, 0), (0, 1, 0), (1, 0, 0)]
+        uniform point3d[] brep:vertexPoint:point:position = [(7, 2, 3), (3, 2, 13), (1, 2, 13), (1, 2, 3), (-4.638155724715451, -0.05212085995401239, 3), (-0.8793852415718169, 1.3159597133486622, 13)]
+        uniform token[] edge:curveType = ["BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI", "BrepCurve3dNurbAPI"]
+        uniform double[] edge:range = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+        uniform int2[] edge:vertexIndices = [(0, 1), (1, 2), (3, 2), (3, 0), (3, 4), (4, 5), (5, 2), (0, 4), (1, 5)]
+        uniform uint[] edgeuse:edgeIndex = [3, 0, 1, 2, 4, 2, 6, 5, 3, 4, 7, 0, 7, 5, 8, 1, 8, 6]
+        uniform uint[] edgeuse:nextRadialEUIndex = [8, 11, 15, 5, 9, 3, 17, 13, 0, 4, 12, 1, 10, 7, 16, 2, 14, 6]
+        uniform token[] edgeuse:orientationType = ["same", "same", "same", "opposite", "opposite", "same", "opposite", "opposite", "opposite", "same", "opposite", "opposite", "same", "same", "opposite", "opposite", "same", "same"]
+        uniform token[] edgeuse:thisRadialEntryType = ["topEntry", "topEntry", "topEntry", "topEntry", "bottomEntry", "bottomEntry", "bottomEntry", "bottomEntry", "bottomEntry", "topEntry", "topEntry", "bottomEntry", "bottomEntry", "topEntry", "topEntry", "bottomEntry", "bottomEntry", "topEntry"]
+        uniform float3[] extent = [(-5.987867, -0.05213086, 2.99999), (7.00001, 9.072341, 13.000015)]
+        uniform uint[] face:loopCount = [1, 1, 1, 1, 1]
+        uniform double2[] face:range = [(0, 0), (12.82809416865966, 12.82809416865966), (0, 0), (12.828094168659662, 12.82809416865966), (0, 0), (13.200000000000003, 13.200000000000001), (0, 0), (3.490658503988659, 10), (0, 0), (4.4, 4.4)]
+        uniform token[] face:surfaceType = ["BrepSurfacePlaneAPI", "BrepSurfacePlaneAPI", "BrepSurfacePlaneAPI", "BrepSurfaceConeAPI", "BrepSurfacePlaneAPI"]
+        uniform token[] face:trimType = ["general", "general", "general", "general", "general"]
+        uniform uint[] faceuse:faceIndex = [4, 0, 1, 3, 2, 1, 0, 3, 2, 4]
+        uniform token[] faceuse:orientationType = ["same", "same", "same", "same", "same", "opposite", "opposite", "opposite", "opposite", "opposite"]
+        uniform uint[] loop:edgeuseCount = [4, 4, 3, 4, 3]
+        uniform uint[] loop:vertexIndex = [9999999, 9999999, 9999999, 9999999, 9999999]
+        uniform uint[] region:shellCount = [1, 1]
+        uniform token[] region:type = ["voidRegion", "solidRegion"]
+        uniform uint[] shell:faceuseCount = [5, 5]
+        uniform token[] shell:pointType = ["none", "none"]
+        uniform uint[] shell:wireEdgeCount = [0, 0]
+        uniform token[] vertex:pointType = ["BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI", "BrepPointAPI"]
+        uniform token[] wireEdge:curveType = []
+        uniform double[] wireEdge:range = []
+        uniform int2[] wireEdge:vertexIndices = []
+    }
+}
+
+

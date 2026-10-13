@@ -17,11 +17,11 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("open")
         .key("Ctrl+O")
         .noundo()
-        .params("path: .solidcraft design, or a .step/.stp file (opens as a new design)"),
+        .params("path: .solidcraft design, or a .step/.stp, .igs/.iges or usd-brep .usda/.usd file (opens as a new design)"),
     CommandSpec::new("file.insert_step", "Insert STEP", insert_step)
         .at("SOLID", "INSERT")
         .icon("import")
-        .params("path: .step/.stp file (its bodies join the design as an Import base feature); name?"),
+        .params("path: .step/.stp, .igs/.iges or usd-brep .usda/.usd file (its bodies join the design as an Import base feature); name?"),
     CommandSpec::new("file.insert_mesh", "Insert Mesh", insert_mesh)
         .at("SOLID", "INSERT")
         .icon("import")
@@ -45,7 +45,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("file.export", "Export", export)
         .icon("export")
         .noundo()
-        .params("path; format?: stl|stla|obj|step|3mf|3mf-tagged|json (default from extension; 3mf-tagged: 3MF whose triangles carry their B-rep face, at full precision, for meshing and analysis tools; docs/formats/3mf-face-tags.md); bodies?: [names] (JSON exports the complete design)"),
+        .params("path; format?: stl|stla|obj|step|iges|usda|3mf|3mf-tagged|json (default from extension; 3mf-tagged: 3MF whose triangles carry their B-rep face, at full precision, for meshing and analysis tools; docs/formats/3mf-face-tags.md); bodies?: [names] (JSON exports the complete design)"),
     CommandSpec::new("file.save_mesh", "Save As Mesh", save_stl).icon("export").noundo().params("path; bodies?: [names]; ascii?: bool"),
 ];
 
@@ -117,7 +117,7 @@ fn insert_step(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.insert_step";
     let path = path_arg(p, cmd)?;
     if !solidcraft_io::is_step_path(path) {
-        return Err(bad(cmd, "only STEP files (.step, .stp) can be inserted"));
+        return Err(bad(cmd, "only STEP, IGES and usd-brep files (.step, .stp, .igs, .iges, .usda, .usd) can be inserted"));
     }
     add_step(s, path, str_(p, "name"))
 }
