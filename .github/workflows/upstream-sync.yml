@@ -1,0 +1,162 @@
+# Fork only (Danny-Dasilva/solidcraft): keep this fork's own commits (usd-brep and this
+# workflow) on top of upstream bherbruck/solidcraft.
+#
+# Every 30 minutes it asks upstream for its latest release. When main doesn't contain that
+# release yet, it rebases the fork's commits onto it, checks the result, backs up the old main
+# as backup/main-<sha>, force-pushes main (which starts CI) and builds the release artifacts.
+# Run workflow can rebase onto any upstream ref instead (a tag, or main).
+#
+# A rebase conflict or a failed check pushes nothing and opens an issue instead.
+#
+# Pushing needs the SYNC_DEPLOY_KEY secret: the private half of a deploy key with write
+# access to this repository. GITHUB_TOKEN can't push changes to workflow files.
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Upstream ref to rebase onto: latest-release, a tag, or main"
+        type: string
+        default: latest-release
+      force:
+        description: "Rebase even when main already contains the target"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: bherbruck/solidcraft
+  CARGO_TERM_COLOR: always
+
+jobs:
+  sync:
+    name: Rebase onto upstream
+    if: github.repository == 'Danny-Dasilva/solidcraft'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          ssh-key: ${{ secrets.SYNC_DEPLOY_KEY }}
+
+      - id: plan
+        name: Pick the upstream target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ inputs.target || 'latest-release' }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          git remote add upstream "https://github.com/$UPSTREAM.git"
+          git fetch --quiet --tags upstream main
+          if [ "$TARGET" = latest-release ]; then
+            TARGET="$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)"
+          fi
+          if git rev-parse --verify --quiet "refs/tags/$TARGET^{commit}" >/dev/null; then
+            target_sha="$(git rev-parse "refs/tags/$TARGET^{commit}")"
+          else
+            git fetch --quiet upstream "$TARGET"
+            target_sha="$(git rev-parse FETCH_HEAD)"
+          fi
+          old_main="$(git rev-parse HEAD)"
+          old_base="$(git merge-base HEAD upstream/main)"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$target_sha" >> "$GITHUB_OUTPUT"
+          echo "old_main=$old_main" >> "$GITHUB_OUTPUT"
+          echo "old_base=$old_base" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$target_sha" "$old_base" && [ "$FORCE" != true ]; then
+            echo "main already contains $TARGET ($target_sha)"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "fork commits $(git rev-list --count "$old_base..HEAD"), rebasing onto $TARGET ($target_sha)"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: rebase
+        name: Rebase the fork's commits
+        if: steps.plan.outputs.run == 'true'
+        env:
+          TARGET_SHA: ${{ steps.plan.outputs.target_sha }}
+          OLD_BASE: ${{ steps.plan.outputs.old_base }}
+        run: |
+          git config user.name "$(git log -1 --format=%an)"
+          git config user.email "$(git log -1 --format=%ae)"
+          if ! git rebase --onto "$TARGET_SHA" "$OLD_BASE" > "$RUNNER_TEMP/rebase.log" 2>&1; then
+            cat "$RUNNER_TEMP/rebase.log"
+            git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts"
+            git rebase --abort
+            echo "conflicts=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          git log --oneline "$TARGET_SHA..HEAD"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.plan.outputs.run == 'true'
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.plan.outputs.run == 'true'
+        with:
+          key: upstream-sync
+
+      - name: Check the rebased tree
+        if: steps.plan.outputs.run == 'true'
+        run: |
+          cargo fmt --all -- --check
+          cargo xtask i18n --check
+          cargo clippy -p solidcraft-kernel -p solidcraft-io -p solidcraft-engine --all-targets --profile ci --locked -- -D warnings
+          cargo test -p solidcraft-kernel --profile ci --locked usd
+          cargo test -p solidcraft-engine --profile ci --locked usd
+
+      - name: Push main
+        if: steps.plan.outputs.run == 'true'
+        env:
+          OLD_MAIN: ${{ steps.plan.outputs.old_main }}
+        run: |
+          git push origin "$OLD_MAIN:refs/heads/backup/main-${OLD_MAIN:0:7}"
+          git push --force-with-lease="main:$OLD_MAIN" origin HEAD:main
+
+      - name: Build the release artifacts
+        if: steps.plan.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main -f draft=false
+
+      - name: Report a failed sync
+        if: failure() && steps.plan.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.plan.outputs.target }}
+          CONFLICTS: ${{ steps.rebase.outputs.conflicts }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Upstream sync onto $TARGET failed"
+          {
+            if [ "$CONFLICTS" = true ]; then
+              echo "Rebasing the fork's commits onto upstream $TARGET hit conflicts in:"
+              echo
+              sed 's/^/- `/; s/$/`/' "$RUNNER_TEMP/conflicts"
+            else
+              echo "The rebase onto upstream $TARGET applied, but a check failed."
+            fi
+            echo
+            echo "Nothing was pushed; main is unchanged. Run: $RUN_URL"
+          } > "$RUNNER_TEMP/body.md"
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          fi
